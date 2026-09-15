@@ -3,15 +3,12 @@
 Vibe Check - Shared utilities for repository inspection
 Fast, dependency-free scanner for vibe-coded projects
 """
-import os
 import re
 import json
-import glob
-import hashlib
 import subprocess
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 
 # Skill installation directory — dynamically determined from this file's location
 # This makes the skill installation-independent (works from ~/.agents/skills/, .opencode/skills/, etc.)
@@ -30,11 +27,6 @@ EXCLUDE_FILES = {".DS_Store", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"
 
 # Secret-bearing files that should NEVER be scanned for architectural analysis
 SECRET_FILE_PATTERNS = {".env", ".pem", ".key", "credentials", "secrets"}
-
-CONFIG_FILE_PATTERNS = [
-    "*.config.*", "*.conf", ".env*", "docker-compose*", "Dockerfile",
-    ".*rc", "*.toml", "*.yaml", "*.yml", "*.json"
-]
 
 SECRET_PATTERNS = [
     r'(?i)api[_-]?key\s*[:=]\s*["\']?[A-Za-z0-9_\-]{16,64}',
@@ -292,8 +284,6 @@ def scan_todos_and_hardcodes(files: List[Path]) -> Tuple[int, List, int, List, i
                         break
         except:
             continue
-        if len(files) > 200 and todo_count > 100:
-            pass
     return todo_count, todo_items, hardcoded_count, hardcoded_items, secrets
 
 def detect_dependencies(root: Path) -> Tuple[List[Path], Dict[str, str], List[str]]:
@@ -343,6 +333,28 @@ def detect_dependencies(root: Path) -> Tuple[List[Path], Dict[str, str], List[st
             dep_files.append(lf)
     return dep_files, deps, hints
 
+def iter_scannable(files: List[Path], limit: int = 300):
+    """Yield files suitable for content sniffing.
+
+    Skips skill files, docs, tests, and secret-bearing files.
+    A file that fails a predicate check is still yielded, never silently dropped.
+    """
+    for f in files[:limit]:
+        skip = False
+        try:
+            if is_skill_file(f):
+                skip = True
+            elif f.suffix == ".md":
+                skip = True
+            elif "tests" in str(f) or "test_" in f.name:
+                skip = True
+            elif is_secret_file(f):
+                skip = True
+        except:
+            pass
+        if not skip:
+            yield f
+
 def detect_state_management(files: List[Path], deps: Dict[str,str], root: Path) -> List[str]:
     found = set()
     dep_str = " ".join(deps.keys()).lower() + " " + " ".join(deps.values()).lower()
@@ -375,20 +387,7 @@ def detect_state_management(files: List[Path], deps: Dict[str,str], root: Path) 
         "jotai": re.compile(r'(import|from|require).*\bjotai\b', re.IGNORECASE),
         "ngrx": re.compile(r'(import|from|require).*\bngrx\b', re.IGNORECASE),
     }
-    filtered = []
-    for f in files[:300]:
-        try:
-            if is_skill_file(f):
-                continue
-            if f.suffix in {".md"}:
-                continue
-            if "tests" in str(f) or "test_" in f.name:
-                continue
-            if is_secret_file(f):
-                continue
-        except:
-            pass
-        filtered.append(f)
+    filtered = list(iter_scannable(files))
     for f in filtered:
         try:
             text = f.read_text(encoding='utf-8', errors='ignore')[:6000]
@@ -425,20 +424,7 @@ def detect_database(files: List[Path], deps: Dict[str,str]) -> List[str]:
     for k,v in db_map.items():
         if k in dep_str:
             found.add(v)
-    filtered = []
-    for f in files[:300]:
-        try:
-            if is_skill_file(f):
-                continue
-            if f.suffix == ".md":
-                continue
-            if "tests" in str(f) or "test_" in f.name:
-                continue
-            if is_secret_file(f):
-                continue
-        except:
-            pass
-        filtered.append(f)
+    filtered = list(iter_scannable(files))
     for f in filtered:
         try:
             t = f.read_text(encoding='utf-8', errors='ignore')[:6000]
@@ -563,6 +549,7 @@ def estimate_coupling(files: List[Path]) -> int:
         try:
             text = f.read_text(encoding='utf-8', errors='ignore')
             imports = len(re.findall(r'^\s*import\s+', text, re.MULTILINE))
+            imports += len(re.findall(r'^\s*from\s+\S+\s+import\s+', text, re.MULTILINE))
             imports += len(re.findall(r'require\(', text))
             total_imports += imports
             count += 1
@@ -649,11 +636,6 @@ def get_git_info(root: Path) -> Tuple[bool, str, str, List[str], List[str], str,
     except:
         pass
     return has_git, status, branch, untracked, logs, diff_stat, changed
-
-# Backwards compatibility: older callers expect 5 returns
-def get_git_info_compat(root: Path):
-    has_git, status, branch, untracked, logs, diff_stat, changed = get_git_info(root)
-    return has_git, status, logs, diff_stat, changed
 
 def scan_repo(root: Path = None, fast: bool = True) -> RepoScan:
     if root is None:

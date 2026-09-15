@@ -5,11 +5,9 @@ Vibe Check - Architectural Conscience for Vibe-Coded Projects
 CLI entrypoint for /vibe-check skill
 Supports: health, forecast, debt, sync, audit, diff, recover
 """
-import os
 import re
 import sys
 import json
-import hashlib
 import argparse
 import shutil
 from pathlib import Path
@@ -56,32 +54,46 @@ def check_integrity(root: Path) -> tuple[bool, str]:
     return True, "VALID"
 
 def integrity_warning(root: Path) -> str:
-    valid, msg = check_integrity(root)
+    """Spec-exact integrity warning block, or "" when state is valid/missing."""
+    valid, _ = check_integrity(root)
     if not valid:
-        return f"Integrity: INVALID\nWarning: The persisted Vibe State has changed since its integrity record was created.\nRepository state remains authoritative.\nDetails: {msg}\n"
+        return ("Integrity: INVALID\n"
+                "Warning: The persisted Vibe State has changed since its integrity record was created.\n"
+                "Repository state remains authoritative.\n")
     return ""
 
 def safe_display(text: str) -> str:
-    """Frame repository-controlled text as data, prevent prompt injection"""
-    # Use sanitize_output to redact secrets and filter injection patterns, then frame
-    sanitized = sanitize_output(text)
-    # Further ensure we don't execute instructions — wrap as data
-    return sanitized
+    """Sanitize text for display: redact secrets, filter prompt-injection patterns."""
+    return sanitize_output(text)
+
+
+def frame_data(text: str) -> str:
+    """Display repository-controlled text as DATA (spec: framed with `Repository content:`).
+
+    Sanitization/injection filtering is preserved via safe_display; the framing
+    marks the value as data so host agents never treat it as instructions.
+    """
+    return "Repository content: " + safe_display(text)
+
+def _ensure_vibe_file(path: Path, template_name: str, fallback: str):
+    """Copy one skill template into .vibe/, or write the fallback if unavailable."""
+    if path.exists():
+        return
+    # Prefer skill template file if it exists (installation-independent)
+    tmpl = SKILL_DIR / "templates" / template_name
+    if tmpl.exists():
+        try:
+            path.write_text(tmpl.read_text(encoding='utf-8'), encoding='utf-8')
+            return
+        except:
+            pass
+    path.write_text(fallback, encoding='utf-8')
 
 def ensure_templates(root: Path):
     """Ensure .vibe files exist with templates if not"""
     vibe = ensure_vibe_dir(root)
     state_md, state_json, lock, debt_md, decisions_md = state_paths(root)
-    # Try to copy from skill templates if available (installation-independent)
-    skill_templates = SKILL_DIR / "templates"
-    if not debt_md.exists():
-        # Prefer skill template file if exists
-        tmpl = skill_templates / "debt.md"
-        if tmpl.exists():
-            try:
-                debt_md.write_text(tmpl.read_text(encoding='utf-8'), encoding='utf-8')
-            except:
-                debt_md.write_text("""# Technical Debt Ledger
+    _ensure_vibe_file(debt_md, "debt.md", """# Technical Debt Ledger
 
 This file tracks intentional shortcuts that could affect future development.
 Only meaningful debt is recorded - not every minor imperfection.
@@ -91,38 +103,13 @@ Only meaningful debt is recorded - not every minor imperfection.
 - Priority is calculated as Impact × Likelihood × Migration Cost
 
 ---
-""", encoding='utf-8')
-        else:
-            debt_md.write_text("""# Technical Debt Ledger
-
-This file tracks intentional shortcuts that could affect future development.
-Only meaningful debt is recorded - not every minor imperfection.
-
-## How to use
-- Status: OPEN, MONITORING, RESOLVED, ACCEPTED
-- Priority is calculated as Impact × Likelihood × Migration Cost
-
----
-""", encoding='utf-8')
-    if not decisions_md.exists():
-        tmpl = skill_templates / "decisions.md"
-        if tmpl.exists():
-            try:
-                decisions_md.write_text(tmpl.read_text(encoding='utf-8'), encoding='utf-8')
-            except:
-                decisions_md.write_text("""# Architectural Decisions
+""")
+    _ensure_vibe_file(decisions_md, "decisions.md", """# Architectural Decisions
 
 Records important decisions that affect future implementation.
 
 ---
-""", encoding='utf-8')
-        else:
-            decisions_md.write_text("""# Architectural Decisions
-
-Records important decisions that affect future implementation.
-
----
-""", encoding='utf-8')
+""")
     return vibe
 
 def compute_health_scores(scan) -> Dict[str, int]:
@@ -130,7 +117,6 @@ def compute_health_scores(scan) -> Dict[str, int]:
     cfg = getattr(scan, 'config', {}) or {}
     # Configurable thresholds with defaults
     todo_warn = cfg.get("todo_warning_threshold", 20)
-    large_threshold = cfg.get("large_file_lines", 400)  # used for display, actual detection already uses it
     # Start high
     velocity = 90
     architecture = 85
@@ -206,8 +192,6 @@ def compute_health_scores(scan) -> Dict[str, int]:
     if scan.secrets_detected:
         debt_percent += 10
     # clamp
-    for k in [velocity, architecture, maintainability, continuity]:
-        pass
     def clamp(v): return max(5, min(95, v))
     return {
         "velocity": clamp(velocity),
@@ -285,12 +269,9 @@ def cmd_health(root: Path):
     overall, regret_magnitude, recommended_next, future_regret = overall_label(scores, scan)
     main_risk, why = detect_main_risk(scan, scores)
     # Integrity check — repository is source of truth
-    valid, msg = check_integrity(root)
-    if not valid:
-        print("Integrity: INVALID")
-        print(f"Warning: The persisted Vibe State has changed since its integrity record was created.")
-        print(f"Repository state remains authoritative. Details: {safe_display(msg)}")
-        print()
+    warn = integrity_warning(root)
+    if warn:
+        print(warn)
 
     # Velocity etc already computed
     print("VIBE CHECK")
@@ -346,12 +327,12 @@ def cmd_health(root: Path):
         print("Details:")
         if scan.large_files:
             for p,l in scan.large_files[:3]:
-                print(f"  • Large file: {p.relative_to(root)} — {l} lines")
+                print(f"  • Large file: {safe_display(str(p.relative_to(root)))} — {l} lines")
         if scan.todo_count:
             print(f"  • TODO/FIXME count: {scan.todo_count}")
         if scan.duplication_candidates:
             for desc, paths in scan.duplication_candidates[:2]:
-                print(f"  • {desc}")
+                print(f"  • {safe_display(desc)}")
         print()
     # drift hint
     if len(scan.state_mgmt) > 1 or len(scan.database_hints) > 1:
@@ -363,58 +344,62 @@ def cmd_health(root: Path):
         print()
 
 # ---------------- FORECAST ----------------
+# (keywords, points, risk text, migration-surface text). points=None selects the
+# database special case below (UI talking straight to the DB scores higher).
+# Order is significant: risks/surfaces are reported in rule order.
+FORECAST_KEYWORD_RULES = [
+    (("hardcode", "hard code", "hard-coded"), 25,
+     "Hardcoded values couple many future files to this shortcut",
+     "Every file that reads this value will need updating"),
+    (("auth", "login", "password", "token", "session", "permission", "role"), 30,
+     "Authentication logic touches almost every layer",
+     "lib/auth/*, api/middleware, UI components, database user table"),
+    (("bypass", "skip", "ignore", "disable", "without auth", "without validation"), 20,
+     "Skipping validation/security creates future migration + security rework",
+     "Validation layer, API contracts, frontend forms"),
+    (("database", "db", "firebase", "supabase", "postgres", "sqlite", "direct db", "ui -> db"), None, None, None),
+    (("temporary", "quick", "just for now", "mvp", "hack", "quick fix", "shortcut"), 10,
+     "Temporary code tends to become permanent_without a migration trigger",
+     "Files created in this change + their dependents"),
+    (("global", "mutable", "singleton"), 20,
+     "Global mutable state creates hidden coupling",
+     "All consumers of the global state"),
+    (("payment", "money", "checkout", "billing", "stripe"), 35,
+     "Payment shortcuts create financial correctness risk",
+     "Checkout flow, order model, webhook handlers, ledger"),
+    (("api", "endpoint", "rest", "graphql"), 12,
+     "API shape will be consumed by multiple clients",
+     "API route, client SDK, frontend pages"),
+    (("copy", "duplicate", "copy-paste"), 15,
+     "Duplication multiplies future bug-fix cost",
+     "Duplicated modules + their tests"),
+]
+
+
 def forecast_regret_score(request: str, scan) -> Tuple[int, str, str, str, List[str], List[str]]:
-    cfg = getattr(scan, 'config', {}) or {}
-    warn_thresh = cfg.get("regret_warning_threshold", 40)
-    block_thresh = cfg.get("regret_blocking_threshold", 70)
     req = request.lower()
     score = 10
     risks = []
     surfaces = []
 
-    # Keyword mapping
-    if any(k in req for k in ["hardcode", "hard code", "hard-coded"]):
-        score += 25
-        risks.append("Hardcoded values couple many future files to this shortcut")
-        surfaces.append("Every file that reads this value will need updating")
-    if any(k in req for k in ["auth", "login", "password", "token", "session", "permission", "role"]):
-        score += 30
-        risks.append("Authentication logic touches almost every layer")
-        surfaces.append("lib/auth/*, api/middleware, UI components, database user table")
-    if any(k in req for k in ["bypass", "skip", "ignore", "disable", "without auth", "without validation"]):
-        score += 20
-        risks.append("Skipping validation/security creates future migration + security rework")
-        surfaces.append("Validation layer, API contracts, frontend forms")
-    if any(k in req for k in ["database", "db", "firebase", "supabase", "postgres", "sqlite", "direct db", "ui -> db"]):
-        # check if UI->DB is suggested
-        if "ui" in req and "database" in req:
-            score += 25
-            risks.append("UI talking directly to database bypasses service boundary")
-            surfaces.append("UI components, service layer, repository layer")
+    # Keyword mapping (data-driven; same order, scores, and texts as before)
+    for keywords, points, risk, surface in FORECAST_KEYWORD_RULES:
+        if not any(k in req for k in keywords):
+            continue
+        if points is None:
+            # Database rule: check if UI->DB is suggested
+            if "ui" in req and "database" in req:
+                score += 25
+                risks.append("UI talking directly to database bypasses service boundary")
+                surfaces.append("UI components, service layer, repository layer")
+            else:
+                score += 15
+                risks.append("Database assumption will spread across persistence code")
+                surfaces.append("Models, repositories, migrations")
         else:
-            score += 15
-            risks.append("Database assumption will spread across persistence code")
-            surfaces.append("Models, repositories, migrations")
-    if any(k in req for k in ["temporary", "quick", "just for now", "mvp", "hack", "quick fix", "shortcut"]):
-        score += 10
-        risks.append("Temporary code tends to become permanent_without a migration trigger")
-        surfaces.append("Files created in this change + their dependents")
-    if any(k in req for k in ["global", "mutable", "singleton"]):
-        score += 20
-        risks.append("Global mutable state creates hidden coupling")
-        surfaces.append("All consumers of the global state")
-    if any(k in req for k in ["payment", "money", "checkout", "billing", "stripe"]):
-        score += 35
-        risks.append("Payment shortcuts create financial correctness risk")
-        surfaces.append("Checkout flow, order model, webhook handlers, ledger")
-    if any(k in req for k in ["api", "endpoint", "rest", "graphql"]):
-        score += 12
-        risks.append("API shape will be consumed by multiple clients")
-        surfaces.append("API route, client SDK, frontend pages")
-    if any(k in req for k in ["copy", "duplicate", "copy-paste"]):
-        score += 15
-        risks.append("Duplication multiplies future bug-fix cost")
-        surfaces.append("Duplicated modules + their tests")
+            score += points
+            risks.append(risk)
+            surfaces.append(surface)
 
     # Architecture health multiplier
     if scan.coupling_score > 60:
@@ -479,13 +464,11 @@ def cmd_forecast(root: Path, request: str):
         print("Or: python vibe_check.py forecast --request \"your change\"")
         return
     scan = scan_repo(root, fast=True)
-    valid, msg = check_integrity(root)
-    if not valid:
-        print("Integrity: INVALID")
-        print(f"Warning: The persisted Vibe State has changed since its integrity record was created. Repository state remains authoritative.")
-        print()
+    warn = integrity_warning(root)
+    if warn:
+        print(warn)
     # Frame request as data to prevent prompt injection
-    safe_request = safe_display(request)
+    safe_request = frame_data(request)
     score, level, benefit, rework, surfaces, risks = forecast_regret_score(request, scan)
 
     print("FORECAST")
@@ -505,7 +488,7 @@ def cmd_forecast(root: Path, request: str):
     print()
     print(f"Estimated migration surface:")
     for s in surfaces[:3]:
-        print(f"• {safe_display(s)}")
+        print(f"• {frame_data(s)}")
     # also include count of files that would be affected
     affected_estimate = "1-2 files" if score < 40 else "3-6 files" if score < 70 else "6-15+ files"
     print(f"• Estimated affected files: {affected_estimate}")
@@ -513,11 +496,14 @@ def cmd_forecast(root: Path, request: str):
     print(f"Regret score:")
     print(f"{score}/100 — {level}")
     print()
-    # Recommendation
-    if score >= 70:
+    # Recommendation — honors regret thresholds from .vibe/config.json (defaults 40/70)
+    cfg = getattr(scan, 'config', {}) or {}
+    warn_thresh = cfg.get("regret_warning_threshold", 40)
+    block_thresh = cfg.get("regret_blocking_threshold", 70)
+    if score >= block_thresh:
         rec = "You can do this, but isolate it. Create a single boundary file (e.g., lib/auth/boundary.js) so replacement is one-file swap. Add debt entry."
         alt = "Fastest safe alternative: Create one interface/abstraction now - hardcode behind it. Keeps the shortcut but limits coupling."
-    elif score >= 40:
+    elif score >= warn_thresh:
         rec = "Proceed with caution. Add a TODO and a debt entry with a future trigger (e.g., 'replace before production auth')."
         alt = "Fastest safe alternative: Extract the shortcut into a dedicated function/file you can replace later."
     else:
@@ -614,13 +600,11 @@ def priority_label(score: int) -> str:
         return "P3"
 
 def cmd_debt(root: Path):
-    viva = ensure_templates(root)
+    ensure_templates(root)
     _, _, _, debt_path, _ = state_paths(root)
-    valid, msg = check_integrity(root)
-    if not valid:
-        print("Integrity: INVALID")
-        print(f"Warning: The persisted Vibe State has changed since its integrity record was created. Repository state remains authoritative.")
-        print()
+    warn = integrity_warning(root)
+    if warn:
+        print(warn)
     debts = parse_debt_ledger(debt_path)
     # also auto-detect potential debt from scan if ledger empty?
     scan = scan_repo(root, fast=True)
@@ -667,7 +651,8 @@ def cmd_debt(root: Path):
             # sort by score desc
             items = sorted(items, key=lambda x: x["_score"], reverse=True)
             for d in items[:5]:
-                print(f"  • {safe_display(d['id'])}: {safe_display(d['title'])} [{safe_display(d['status'])}|Risk:{safe_display(d['risk'])}|Rework:{safe_display(d['rework'])}] — {safe_display(d['location'])}")
+                line = f"{d['id']}: {d['title']} [{d['status']}|Risk:{d['risk']}|Rework:{d['rework']}] — {d['location']}"
+                print(f"  • {frame_data(line)}")
         print()
 
     total_open = sum(len(v) for v in buckets.values())
@@ -676,12 +661,14 @@ def cmd_debt(root: Path):
     all_open = [d for bucket in buckets.values() for d in bucket]
     if all_open:
         most = sorted(all_open, key=lambda x: x["_score"], reverse=True)[0]
-        print(f"Most important debt: {safe_display(most['id'])} — {safe_display(most['title'])} (Priority {most['_priority']})")
+        top = f"{most['id']} — {most['title']} (Priority {most['_priority']})"
+        print(f"Most important debt: {frame_data(top)}")
         print()
         print("Recommended order:")
         sorted_all = sorted(all_open, key=lambda x: x["_score"], reverse=True)[:3]
         for i, d in enumerate(sorted_all, 1):
-            print(f"{i}. {safe_display(d['id'])} — {safe_display(d['title'])} ({d['_priority']})")
+            item = f"{d['id']} — {d['title']} ({d['_priority']})"
+            print(f"{i}. {frame_data(item)}")
     print()
     print("Ledger: .vibe/debt.md  |  Run `/vibe-check sync` to update")
 
@@ -784,7 +771,7 @@ def generate_state_content(root: Path, scan, existing_state: str = None) -> str:
     # Try more specific
     if "react/next" in scan.framework_hints:
         frontend = "React / Next.js"
-    elif "flutter/dart" in str(scan.database_hints):
+    elif "flutter/dart" in scan.framework_hints:
         frontend = "Flutter"
     elif "vue" in scan.framework_hints:
         frontend = "Vue"
@@ -920,10 +907,9 @@ def cmd_sync(root: Path, dry_run: bool = False):
         valid, cur, msg = verify_lock(state_md, lock_path)
         integrity_before = msg
         if not valid:
-            print("Integrity: INVALID")
-            print(f"Warning: The persisted Vibe State has changed since its integrity record was created.")
-            print(f"Repository state remains authoritative. Details: {safe_display(msg)}")
-            print()
+            warn = integrity_warning(root)
+            if warn:
+                print(warn)
     else:
         integrity_before = "no prior lock"
 
@@ -983,11 +969,11 @@ def cmd_sync(root: Path, dry_run: bool = False):
             if added:
                 print("Would add:")
                 for l in added:
-                    print(f"+ {safe_display(l[:120])}")
+                    print(f"+ {frame_data(l[:120])}")
             if removed:
                 print("Would remove:")
                 for l in removed:
-                    print(f"- {safe_display(l[:120])}")
+                    print(f"- {frame_data(l[:120])}")
             if not added and not removed:
                 print("No changes detected — state already up to date.")
         else:
@@ -997,21 +983,11 @@ def cmd_sync(root: Path, dry_run: bool = False):
         print("Run without --dry-run to apply. Repository is source of truth.")
         return
 
-    # --- Backup previous state before overwriting ---
+    # --- Backup previous state before overwriting (spec: .vibe/state.md.bak) ---
     if had_state and existing is not None:
         try:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-            backup_dir = vibe / "backups"
-            backup_dir.mkdir(exist_ok=True)
-            backup_path = backup_dir / f"state.{timestamp}.md.bak"
+            backup_path = vibe / "state.md.bak"
             shutil.copy2(state_md, backup_path)
-            # keep only last 5 backups
-            backups = sorted(backup_dir.glob("state.*.md.bak"), key=lambda p: p.stat().st_mtime, reverse=True)
-            for old in backups[5:]:
-                try:
-                    old.unlink()
-                except:
-                    pass
         except Exception as e:
             print(f"Warning: could not create backup: {safe_display(str(e))}", file=sys.stderr)
 
@@ -1074,7 +1050,7 @@ def cmd_sync(root: Path, dry_run: bool = False):
         print("+ No major changes detected")
     # also mention recent git
     if scan.git_log_recent:
-        print(f"+ Recent commit: {scan.git_log_recent[0][:60]}")
+        print(f"+ Recent commit: {frame_data(scan.git_log_recent[0][:60])}")
     print()
     print("Preserved:")
     for p in preserved[:5]:
@@ -1096,11 +1072,9 @@ def cmd_sync(root: Path, dry_run: bool = False):
 # ---------------- AUDIT ----------------
 def cmd_audit(root: Path):
     scan = scan_repo(root, fast=False)
-    valid, msg = check_integrity(root)
-    if not valid:
-        print("Integrity: INVALID")
-        print(f"Warning: The persisted Vibe State has changed since its integrity record was created. Repository state remains authoritative.")
-        print()
+    warn = integrity_warning(root)
+    if warn:
+        print(warn)
     print("ARCHITECTURAL AUDIT")
     print()
     # Expanded drift detection
@@ -1134,10 +1108,10 @@ def cmd_audit(root: Path):
     if scan.large_files:
         for p,l in scan.large_files[:5]:
             sev = "Critical" if l>800 else "High" if l>600 else "Medium"
-            print(f"• {sev}: Oversized file {p.relative_to(root)} ({l} lines) - consider splitting")
+            print(f"• {sev}: Oversized file {safe_display(str(p.relative_to(root)))} ({l} lines) - consider splitting")
     if scan.duplication_candidates:
         for desc, paths in scan.duplication_candidates[:3]:
-            print(f"• Medium: {desc} across {len(paths)} files")
+            print(f"• Medium: {safe_display(desc)} across {len(paths)} files")
     if scan.todo_count > 20:
         print(f"• Medium: {scan.todo_count} TODO/FIXME markers - debt accumulating")
     elif scan.todo_count > 5:
@@ -1234,7 +1208,9 @@ def cmd_audit(root: Path):
     print("---")
     scores = compute_health_scores(scan)
     avg = sum([scores["velocity"], scores["architecture"], scores["maintainability"], scores["continuity"]])/4
-    if avg >= 75:
+    if avg >= 80 and not scan.large_files and scan.todo_count <= 10:
+        traj = "IMPROVING"
+    elif avg >= 75:
         traj = "STABLE"
     elif avg >= 55:
         traj = "STABLE"
@@ -1242,7 +1218,6 @@ def cmd_audit(root: Path):
             traj = "DEGRADING"
     else:
         traj = "DEGRADING"
-    # If git log shows recent improvement? not know, assume stable
     biggest = detect_main_risk(scan, scores)[0]
     print(f"Architecture trajectory: {traj}")
     print()
@@ -1265,11 +1240,9 @@ def cmd_audit(root: Path):
 # ---------------- DIFF ----------------
 def cmd_diff(root: Path):
     scan = scan_repo(root, fast=True)
-    valid, msg = check_integrity(root)
-    if not valid:
-        print("Integrity: INVALID")
-        print(f"Warning: The persisted Vibe State has changed since its integrity record was created. Repository state remains authoritative.")
-        print()
+    warn = integrity_warning(root)
+    if warn:
+        print(warn)
     vibe = root / ".vibe"
     state_md = vibe / "state.md"
     has_state = state_md.exists()
@@ -1277,10 +1250,10 @@ def cmd_diff(root: Path):
     print("ARCHITECTURAL DIFF")
     print()
     if scan.git_branch:
-        print(f"Branch: {safe_display(scan.git_branch)}")
+        print(f"Branch: {frame_data(scan.git_branch)}")
         print()
     if scan.git_untracked:
-        print(f"Untracked files: {', '.join(safe_display(x) for x in scan.git_untracked[:5])}")
+        print(f"Untracked files: {frame_data(', '.join(scan.git_untracked[:5]))}")
         print()
     # Before
     print("Before:")
@@ -1293,13 +1266,13 @@ def cmd_diff(root: Path):
             m2 = re.search(r'State management:\s*(.+)', txt)
             sm = m2.group(1).strip() if m2 else "unknown"
             # try git previous?
-            print(f"• Architecture: {pat}")
-            print(f"• State management: {sm}")
+            print(f"• Architecture: {frame_data(pat)}")
+            print(f"• State management: {frame_data(sm)}")
             # file size from state json if exists
             sf = vibe / "state.json"
             if sf.exists():
                 data = json.loads(sf.read_text(encoding='utf-8', errors='ignore'))
-                print(f"• Files: {data.get('counts',{}).get('files','unknown')}")
+                print(f"• Files: {safe_display(str(data.get('counts',{}).get('files','unknown')))}")
         except:
             print("• State file exists but unreadable")
     else:
@@ -1343,7 +1316,7 @@ def cmd_diff(root: Path):
     # New debt
     print("New debt:")
     if scan.has_git and scan.git_diff_stat:
-        print(f"  {scan.git_diff_stat[:500].replace(chr(10), ', ')}")
+        print(f"  {frame_data(scan.git_diff_stat[:500].replace(chr(10), ', '))}")
         # hint debt
         if "TODO" in scan.git_diff_stat or scan.todo_count:
             print("  • Potential new debt from TODOs/hacks")
@@ -1394,16 +1367,16 @@ def cmd_diff(root: Path):
         print()
     print("Git details:")
     if scan.has_git:
-        print(f"• Branch: {safe_display(scan.git_branch) if scan.git_branch else 'unknown'}")
-        print(f"• Status: {safe_display(scan.git_status[:300]) if scan.git_status else 'clean'}")
+        print(f"• Branch: {frame_data(scan.git_branch) if scan.git_branch else 'unknown'}")
+        print(f"• Status: {frame_data(scan.git_status[:300]) if scan.git_status else 'clean'}")
         if scan.git_untracked:
-            print(f"• Untracked: {', '.join(safe_display(x) for x in scan.git_untracked[:5])}")
+            print(f"• Untracked: {frame_data(', '.join(scan.git_untracked[:5]))}")
         if scan.git_log_recent:
-            print(f"• Recent: {safe_display(scan.git_log_recent[0])}")
+            print(f"• Recent: {frame_data(scan.git_log_recent[0])}")
         if scan.git_diff_stat:
             print(f"• Diff stat available ({len(scan.git_diff_stat)} chars)")
         if scan.recent_changed_files:
-            print(f"• Changed files: {', '.join(safe_display(x) for x in scan.recent_changed_files[:5])}")
+            print(f"• Changed files: {frame_data(', '.join(scan.recent_changed_files[:5]))}")
     else:
         print("• No git repo detected")
 
@@ -1502,9 +1475,9 @@ def cmd_recover(root: Path):
         print()
         for state_says, repo_says in conflicts:
             print(f"State says:")
-            print(f"  {state_says}")
+            print(f"  {frame_data(state_says)}")
             print(f"Repository says:")
-            print(f"  {repo_says}")
+            print(f"  {frame_data(repo_says)}")
             print()
         print("Resolution:")
         print("Repository state wins.")
@@ -1521,7 +1494,7 @@ def cmd_recover(root: Path):
     if m:
         for line in m.group(1).strip().splitlines():
             if line.strip():
-                print(line.strip())
+                print(frame_data(line.strip()))
     else:
         print("(none)")
     print()
