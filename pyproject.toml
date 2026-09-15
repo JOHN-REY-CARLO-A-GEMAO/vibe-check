@@ -1,0 +1,43 @@
+[project]
+name = "vibe-check"
+version = "0.1.0"
+description = "Architectural conscience for vibe-coded projects that detects context drift, technical debt, architectural risk, and future rework without slowing development velocity."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "JOHN REY CARLO A. GEMAO" }]
+requires-python = ">=3.10"
+keywords = ["architecture", "technical-debt", "vibe-coding", "context-drift", "maintainability", "code-health"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/JOHN-REY-CARLO-A-GEMAO/vibe-check"
+Repository = "https://github.com/JOHN-REY-CARLO-A-GEMAO/vibe-check"
+Issues = "https://github.com/JOHN-REY-CARLO-A-GEMAO/vibe-check/issues"
+Skills = "https://skills.sh/JOHN-REY-CARLO-A-GEMAO/vibe-check"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+# skills.sh installs via `npx skills add <owner>/<repo>` (git clone),
+# not via PyPI. No [project.scripts] entry point on purpose:
+# the skill runs installation-independent via
+# `python "$SKILL_DIR/scripts/vibe_check.py"` (see SKILL.md),
+# and `scripts/` is intentionally not an importable package,
+# so setuptools must not try to build/upload it as one.
+[tool.setuptools]
+py-modules = []
+packages = []

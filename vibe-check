@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Wrapper for /vibe-check skill - maps slash commands to python CLI
+# Usage: ./vibe-check/vibe-check [forecast|debt|sync|audit|diff|recover] [--request "..."]
+# Also supports: ./vibe-check forecast "Just hardcode login..."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+python3 "$ROOT/vibe-check/scripts/vibe_check.py" "$@"
